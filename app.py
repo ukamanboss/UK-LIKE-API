@@ -26,9 +26,6 @@ app = Flask(__name__)
 # ==========================================
 # LEVEL INFO LOGIC (Independent)
 # ==========================================
-def format_num(num):
-    return "{:,}".format(num)
-
 LEVELS = {
     "1": 0, "2": 48, "3": 202, "4": 544, "5": 1012, "6": 1844, "7": 2792, "8": 3800,
     "9": 4870, "10": 6004, "11": 7192, "12": 8448, "13": 9776, "14": 11140, "15": 12566,
@@ -49,9 +46,140 @@ LEVELS = {
     "100": 32032284,
 }
 
-def get_exp_for_level(level):
+def calculate_level_progress(current_exp, current_level):
     try:
-        level_str = str(int(level))
+        current_level = int(current_level)
+        if current_level >= 100:
+            return {"current_level": 100, "progress_percentage": 100}
+        
+        exp_for_current = LEVELS.get(str(current_level), 0)
+        exp_for_next = LEVELS.get(str(current_level + 1), 0)
+        
+        if exp_for_next == 0: return None
+        
+        exp_range = exp_for_next - exp_for_current
+        progress = min(100, max(0, ((current_exp - exp_for_current) / exp_range) * 100)) if exp_range > 0 else 0
+        
+        return {
+            "current_level": current_level,
+            "current_exp": current_exp,
+            "exp_needed": exp_for_next - current_exp,
+            "progress_percentage": round(progress, 1)
+        }
+    except: return None
+
+# ==========================================
+# CORE UTILS
+# ==========================================
+def load_tokens(server_name, for_visit=False):
+    path = "token_ind" if server_name == "IND" else "token_br" if server_name in {"BR", "US", "SAC", "NA"} else "token_bd"
+    path += "_visit.json" if for_visit else ".json"
+    try:
+        with open(path, "r") as f:
+            tokens = json.load(f)
+            return tokens if isinstance(tokens, list) else []
+    except: return []
+
+def encrypt_message(plaintext):
+    cipher = AES.new(b'Yg&tc%DEuh6%Zc^8', AES.MODE_CBC, b'6oyZDr22E3ychjM%')
+    return binascii.hexlify(cipher.encrypt(pad(plaintext, AES.block_size))).decode('utf-8')
+
+def create_protobuf_message(uid, region):
+    msg = like_pb2.like()
+    msg.uid, msg.region = int(uid), region
+    return msg.SerializeToString()
+
+async def send_single_like_request(enc_payload, token_dict, url):
+    token = token_dict.get("token", "")
+    headers = {'User-Agent': "Dalvik/2.1.0", 'Authorization': f"Bearer {token}", 'Content-Type': "application/x-www-form-urlencoded"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=bytes.fromhex(enc_payload), headers=headers, timeout=5) as resp:
+                return resp.status
+    except: return 500
+
+def make_profile_check_request(uid, server, token_dict):
+    token = token_dict.get("token", "")
+    url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow" if server == "IND" else "https://client.us.freefiremobile.com/GetPlayerPersonalShow" if server in {"BR", "US", "SAC", "NA"} else "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+    
+    msg = uid_generator_pb2.uid_generator()
+    msg.krishna_, msg.teamXdarks = int(uid), 1
+    enc_payload = encrypt_message(msg.SerializeToString())
+    
+    headers = {'User-Agent': "Dalvik/2.1.0", 'Authorization': f"Bearer {token}", 'Content-Type': "application/x-www-form-urlencoded"}
+    try:
+        res = requests.post(url, data=bytes.fromhex(enc_payload), headers=headers, verify=False, timeout=10)
+        items = like_count_pb2.Info()
+        items.ParseFromString(res.content)
+        return items
+    except: return None
+
+# ==========================================
+# ROUTES
+# ==========================================
+
+@app.route('/like', methods=['GET'])
+def handle_requests():
+    uid = request.args.get("uid")
+    server = request.args.get("server_name", "").upper()
+    if not uid or not server: return jsonify({"error": "Missing params"}), 400
+
+    visit_tokens = load_tokens(server, True)
+    v_token = visit_tokens[0] if visit_tokens else {}
+    
+    # Before likes
+    profile = make_profile_check_request(uid, server, v_token)
+    b_likes = int(getattr(profile.AccountInfo, 'Likes', 0)) if profile else 0
+
+    # Process Likes
+    all_t = load_tokens(server, False)
+    batch = random.sample(all_t, min(len(all_t), TOKEN_BATCH_SIZE))
+    
+    if batch:
+        like_url = "https://client.ind.freefiremobile.com/LikeProfile" if server == "IND" else "https://client.us.freefiremobile.com/LikeProfile" if server in {"BR", "US", "SAC", "NA"} else "https://clientbp.ggblueshark.com/LikeProfile"
+        payload = encrypt_message(create_protobuf_message(uid, server))
+        
+        async def run_batch():
+            tasks = [send_single_like_request(payload, t, like_url) for t in batch]
+            await asyncio.gather(*tasks)
+        
+        asyncio.run(run_batch())
+
+    # After likes & Info
+    profile = make_profile_check_request(uid, server, v_token)
+    a_likes = b_likes
+    name, lvl, exp = "N/A", 0, 0
+    
+    if profile and hasattr(profile, 'AccountInfo'):
+        a_likes = int(getattr(profile.AccountInfo, 'Likes', b_likes))
+        name = str(getattr(profile.AccountInfo, 'PlayerNickname', 'N/A'))
+        lvl = int(getattr(profile.AccountInfo, 'Level', 0))
+        exp = int(getattr(profile.AccountInfo, 'Exp', 0))
+
+    prog = calculate_level_progress(exp, lvl)
+    
+    return jsonify({
+        "LikesGivenByAPI": a_likes - b_likes,
+        "LikesafterCommand": a_likes,
+        "LikesbeforeCommand": b_likes,
+        "PlayerNickname": name,
+        "UID": uid,
+        "Level": lvl,
+        "CurrentEXP": exp,
+        "ExpProgress": f"{prog['progress_percentage']}%" if prog else "0%",
+        "RemainingLikes": len(all_t),
+        "TotalLimit": len(all_t)
+    })
+
+@app.route('/token_info')
+def token_info():
+    res = {}
+    for s in ["IND", "BD", "BR", "US"]:
+        res[s] = {"regular_tokens": len(load_tokens(s, False)), "visit_tokens": len(load_tokens(s, True))}
+    return jsonify(res)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5001)
         return LEVELS.get(level_str, 0)
     except:
         return 0
