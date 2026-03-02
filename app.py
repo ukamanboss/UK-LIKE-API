@@ -319,6 +319,7 @@ def handle_requests():
     likes_increment = after_like_count - before_like_count
     request_status = 1 if likes_increment > 0 else (2 if likes_increment == 0 else 3)
 
+    # YAHAN ADD KI HAI API LIMITS (RemainingLikes aur TotalLimit)
     response_data = {
         "LikesGivenByAPI": likes_increment,
         "LikesafterCommand": after_like_count,
@@ -326,6 +327,8 @@ def handle_requests():
         "PlayerNickname": player_nickname_from_profile,
         "UID": actual_player_uid_from_profile,
         "status": request_status,
+        "RemainingLikes": len(all_available_tokens),
+        "TotalLimit": len(all_available_tokens),
         "Note": f"Used visit token for profile check and {'random' if use_random else 'rotating'} batch of {len(tokens_for_like_sending)} tokens for like sending."
     }
     return jsonify(response_data)
