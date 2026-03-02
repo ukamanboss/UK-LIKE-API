@@ -6,4 +6,3 @@ pycryptodome
 protobuf
 Werkzeug
 firebase-admin
-urllib3
